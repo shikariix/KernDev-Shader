@@ -2,95 +2,132 @@ Shader "Unlit/unlit"
 {
 	Properties
 	{
+		_Color ("Color", Color) = (0.5019608,0.5019608,0.5019608,1)
 		_MainTex ("Texture", 2D) = "white" {}
-	_NormalMap ("Normal Map", 2D) = "blue" {}
+	_NormalMap ("Normal Map", 2D) = "bump" {}
+	_NormalMapII ("Normal Map II", 2D) = "bump" {}
+	_Transparency ("Transparency", Range (-1, 1)) = 0
 	}
 		SubShader
 	{
+		// - vertex and fragment shader
+
 		Tags {
 		"RenderType" = "Transparent"
 		"Queue" = "Transparent-1"
+		"IgnoreProjector" = "True"
 	}
-		LOD 100
+		//LOD 100
 
-		//Various blend modes and how to set them up
-		//alpha
-		Blend SrcAlpha OneMinusSrcAlpha		//IMPORTANT: render order heavily influences correct results (needs to be back to front)
-
-		//additive
-		//Blend One One
-
-		//multiply blend
-		//Blend DstColor SrcColor
-
-		//you can influence the type of "depth test", which compares the current pixel depth with previously written pixels
-		// default is LEqual, meaning "if depth is less or equal to existing, then this pixel will pass its test and be drawn"
-		//ZTest Always	//always means -> always draw, good for UI and overlay graphics (because you'll see them even if they're behind something else)
 		
+		//alpha
+		Blend SrcAlpha OneMinusSrcAlpha
 
 		//This copies the existing destination buffer (what was drawn before) into a global texture called _GrabTexture
 		GrabPass {}
 
 		Pass
 	{
+		Name "FORWARD"
+		Tags {
+		"LightMode" = "ForwardBase"
+	}
+
 		CGPROGRAM
 #pragma vertex vert
 #pragma fragment frag
-		// make fog work
+#define UNITY_PASS_FORWARDBASE
+#define SHOULD_SAMPLE_SH (defined (LIGHTMAP_OFF) && defined (DYNAMICLIGHTMAP_OFF))
+#define _GLOSSYENV 1
 #pragma multi_compile_fog
 
 #include "UnityCG.cginc"
+#include "Lighting.cginc"
+#include "UnityPBSLighting.cginc"
+#include "UnityStandardBRDF.cginc"
 
-		//this struct gets model data (per vertex) from the channels (semantics) you see after :
-		struct appdata {
+#pragma multi_compile_fwdbase
+#pragma multi_compile LIGHTMAP_OFF LIGHTMAP_ON
+#pragma multi_compile DIRLIGHTMAP_OFF DIRLIGHTMAP_COMBINED DIRLIGHTMAP_SEPARATE
+#pragma multi_compile DYNAMICLIGHTMAP_OFF DYNAMICLIGHTMAP_ON
+#pragma multi_compile_fog
+#pragma only_renderers d3d9 d3d11 glcore gles n3ds wiiu 
+#pragma target 3.0
+		uniform sampler2D _GrabTexture;
+	uniform float4 _Color;
+	uniform sampler2D _BumpMap; uniform float4 _BumpMap_ST;
+	uniform sampler2D _snow; uniform float4 _snow_ST;
+	uniform sampler2D _NormalMapII; uniform float4 _NormalMapII_ST;
+	uniform float _Freezeeffectnormal;
+	uniform fixed _LocalGlobal;
+	uniform float _Transparency;
+	uniform float _Ice_fresnel;
+
+
+		//input data
+		struct VertexInput {
 		float4 vertex : POSITION;
 		float2 uv : TEXCOORD0;
+		float2 texcoord0 : TEXCOORD1;
+		float2 texcoord1 : TEXCOORD2;
+		float2 texcoord2 : TEXCOORD3;
 		float4 color : COLOR;
+		float4 tangent : TANGENT;
 		float3 normal : NORMAL;
 	};
 
-	//Here we use another struct to select channels to send data to the pixel shader
-	//All of these values will be rasterized & interpolated to become per-pixel data
-	struct v2f {
+	//output data
+	struct VertexOutput {
 
-		float2 uv : TEXCOORD0;
-		UNITY_FOG_COORDS (1)
-			float4 vertex : SV_POSITION;
+		float4 vertex : SV_POSITION;
+		float2 uv0 : TEXCOORD0;
+		float2 uv1 : TEXCOORD1;
+		float2 uv2 : TEXCOORD2;
+		UNITY_FOG_COORDS (8)
 
 		//custom values
-		float3 worldPos : TEXCOORD1; 
-		float3 worldNormal : TEXCOORD2; 
-		float4 screenPos : TEXCOORD3; 
-		float3 worldRefl : TEXCOORD4; 
+		float3 worldPos : TEXCOORD3; 
+		float3 worldNormal : TEXCOORD4; 
+		float4 screenPos : TEXCOORD5; 
+		float3 worldRefl : TEXCOORD6; 
 
-		//need object normal for (my version of) normal mapping
-		float3 objectNormal : TEXCOORD5;
+		float3 objectNormal : TEXCOORD7;
+		float3 tangentDir : TEXCOORD8;
+		float3 bitangentDir : TEXCOORD9;
+		UNITY_FOG_COORDS (8)
 	};
 
 	sampler2D _MainTex;
 	float4 _MainTex_ST;
 
 	sampler2D _NormalMap;
-	uniform half _Alpha;
 
 	uniform float3 _ClipPosition;
-	uniform sampler2D _GrabTexture;
 
-	v2f vert (appdata v) {
+	VertexOutput vert (VertexInput v) {
 		//this is what you get by default
-		v2f o;
+		VertexOutput o = (VertexOutput)0;
 		o.vertex = UnityObjectToClipPos (v.vertex);
-		o.uv = TRANSFORM_TEX (v.uv, _MainTex);
+		o.uv1 = TRANSFORM_TEX (v.uv, _MainTex);
+
+		//check 
+#ifdef LIGHTMAP_ON
+		o.ambientOrLightmapUV.xy = v.texcoord1.xy * unity_LightmapST.xy + unity_LightmapST.zw;
+		o.ambientOrLightmapUV.zw = 0;
+#elif UNITY_SHOULD_SAMPLE_SH
+#endif
+#ifdef DYNAMICLIGHTMAP_ON
+		o.ambientOrLightmapUV.zw = v.texcoord2.xy * unity_DynamicLightmapST.xy + unity_DynamicLightmapST.zw;
+#endif
+
 		UNITY_TRANSFER_FOG (o,o.vertex);
 
-		//worldPos, mul is a cG function that takes a Matrix and a Position, and outputs a transform Position
 		// unity_ObjectToWorld is our matrix here, v.vertex the object-space vertex position
 		o.worldPos = mul (unity_ObjectToWorld, v.vertex);
 
 		//worldNormal
-		//Again we mul the matrix, but this time with the vertex normal. To remove stretching due to object scale, we normalize the output.
 		o.worldNormal = normalize (mul (unity_ObjectToWorld, v.normal));
-
+		o.tangentDir = normalize (mul (unity_ObjectToWorld, float4(v.tangent.xyz, 0.0)).xyz);
 		//screenPos
 		//This function can be found in the UnityCG.cginc, and calculates a screen position (x,y,z,w) containing pixel position on the screen
 		o.screenPos = ComputeGrabScreenPos (o.vertex);
@@ -99,8 +136,10 @@ Shader "Unlit/unlit"
 		//_WorldSpaceCameraPos contains world camera position (duh) of camera currently rendering this object
 		float3 viewDir = normalize (_WorldSpaceCameraPos - o.worldPos);
 		//reflect is a cG function that reflects a direction across a surface (which is defined by a surface normal)
-		o.worldRefl = reflect (-viewDir, o.worldNormal);
+		 float3 worldRefl = reflect (-viewDir, o.worldNormal);
 
+		 Unity_GlossyEnvironmentData ugls_en_data;
+		 ugls_en_data.reflUVW = worldRefl;
 
 		//pass through object normal without changing it (for normal mapping in pixel shader)
 		o.objectNormal = v.normal;
@@ -108,7 +147,7 @@ Shader "Unlit/unlit"
 		return o;
 	}
 
-	fixed4 frag (v2f i) : SV_Target
+	fixed4 frag (VertexOutput i) : SV_Target
 	{
 		// samples the texture using world XY
 		//fixed4 col = tex2D(_MainTex, i.worldPos.xy);
@@ -116,7 +155,7 @@ Shader "Unlit/unlit"
 		//NORMAL MAPPING//
 		//get normal map texture 
 		//The UnpackNormal function expects a texture that was imported as a "Normal Map", otherwise you'll get incorrect results
-		float3 norm = UnpackNormal (tex2D (_NormalMap, i.uv));
+		float3 norm = UnpackNormal (tex2D (_NormalMap, i.uv1));
 		//offset object normal RG with texture RG
 		i.objectNormal.rg += norm.rg * .5;
 		//translate to world space
@@ -160,13 +199,11 @@ Shader "Unlit/unlit"
 
 		//For fresnel (reflection/translucency) term we need per-pixel view direction, so we calculate it again
 		float3 viewDir = normalize (_WorldSpaceCameraPos - i.worldPos);
-		//1 - dot(A,B) means front of object is 0 (directions are opposite), and edge of object is 1
 		float fresnel = 1 - dot (viewDir, worldNormal);
 
 		//output a blend of backbground & sky reflection, based on fresnel, then add a more subtle fresnel as rimlight
 		//return half4(lerp (grabColor.rgb, skyColor, fresnel), .5) + pow (fresnel, 3);
-		return half4(grabColor.rgb, _Alpha + 1) + pow (fresnel, 1);
-		//return half4(grabColor.rgb, .5) + pow (fresnel, 2);
+		return half4(grabColor.rgb, _Transparency) + pow (fresnel, 1);
 	}
 		ENDCG
 	}
